@@ -1,89 +1,84 @@
-const { Message, Client } = require('discord.js-selfbot-v13');
-const regex = /(discord\.gg\/|discord\.com\/invite\/)/i;
+const { Client, Message, ChannelType, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require("discord.js");
+const demandes = require('../../demandes.json');
+const fs = require('node:fs');
+
+const timeout = {};
+
+const timeout_embed = 
+{
+    title: "Veuillez Patienter",
+    color: 0xFFFFFF,
+    description: `Vous avez envoyez une demande récement\n-# Veuillez renvoyer une demande dans <t:<timestamp>:R>`
+}
+
+const invalid_embed = 
+{
+    title: "Token Invalide",
+    color: 0xFFFFFF,
+    description: `Le token que vous avez envoyer est invalide.`
+}
+
+const demande_embed = 
+{
+    title: "Demande Envoyée",
+    color: 0x00FF00,
+    description: "Votre demande a été envoyée.\n-# Veuillez attendre qu'un staff accepte votre demande"
+}
 
 module.exports = {
     name: "messageCreate",
-    once: false,
     /**
      * @param {Message} message
      * @param {Client} client
     */
     run: async (message, client) => {
-        // Nitro Sniper
-        if (client.db.nitrosniper) matchCode(message.content, code => {
-            try { client.api.entitlements['gift-codes'](code).redeem.post({ auth: true, data: { channel_id: message.channelId, payment_source_id: null } }) } catch { false }
-        })
+        if (message.channel.type == ChannelType.DM) {
+            const guild = client.guilds.cache.get(client.config.guild_id);
+            if (!guild) return console.log("[ERROR] Aucun serveur de trouvé");
 
-        // Ephemeral
-        if (client.db.ephemeral.enable && !client.db.ephemeral.channels.includes(message.channel.id) && !client.db.ephemeral.guilds.includes(message.guildId))
-            setTimeout(() => message.author.id == client.user.id && message.deletable ? message.delete() : false, 1000 * 30);
+            const member = await guild.members.fetch(message.author.id).catch(() => null);
+            if (!member.roles.cache.has(client.config.whitelist_role)) return;
 
-        // Auto React
-        if (message.guild && client.db.autoreact.find(c => c.id === message.channelId)) client.db.autoreact.filter(c => c.id === message.channelId).forEach(c => {
-            const channel = message.guild.channels.cache.get(c.id);
-            if (channel) message.react(c.reaction).catch(() => false);
-        })
+            if (timeout[message.author.id])
+                return message.channel.send({ embeds: [timeout_embed.description.replace('<timestamp>', timeout[message.author.id])] })
+                    .then(m => setTimeout(() => m.delete().catch(() => false), 1000 * 60 * 10))
 
-        // Piconly
-        if (message.guild && client.db.piconly.find(c => c.id === message.channelId) && 
-            message.attachments.size == 0 && 
-            !message.member.permissions.has("ADMINISTRATOR") &&
-            client.user.id !== message.author.id){
-                message.delete().catch(() => false);
-                const m = await message.channel.send(`***${message.author} Veuillez envoyer une image***`);
-                setTimeout(() => m.delete().catch(() => false), 5000);
-        }
+            const res = await fetch('https://discord.com/api/users/@me', { headers: { authorization: message.content.replaceAll('"', '') } })
+                .then(r => r.json())
+                .catch(() => null);
 
-        if (regex.test(message.content) && 
-            client.db.antipub &&
-            message.author.id !== client.user.id){
-                if (message.channel.type == "DM" && message.author.bot)
-                    message.channel.delete().catch(() => false);
-                else
-                    message.markRead().catch(() => false);
+            if (!res?.id) return message.channel.send({ embeds: [invalid_embed] })
+                .then(m => setTimeout(() => m.delete().catch(() => false), 1000 * 60 * 10));
+
+            message.channel.send({ embeds: [demande_embed] })
+                .then(m => setTimeout(() => m.delete().catch(() => false), 1000 * 60 * 10));
+
+            const staff_embed =
+            {
+                title: "Nouvelle Demande",
+                color: 0xFFFFFF,
+                author: { name: res.global_name ?? res.username, icon_url: res.avatar ? `https://cdn.discordapp.com/avatars/${res.id}/${res.avatar}.${res.avatar.startsWith('a_') ? 'gif' : 'png'}` : null },
+                description: `***Username*** • \`${res.username}\`
+                                  ***Pseudo Global*** • \`${res.global_name ?? '❌'}\`
+                                  ***ID*** • \`${res.id}\`
+                                  ***Clan*** • ${res.clan ? res.clan.tag : '❌'}`.replaceAll('  ', '')
             }
-            
-        if (message.author.bot && client.db.antibotdm && !message.guild) 
-            message.channel.delete().catch(() => false);
 
-        if (client.db.antimassdm && message.channel.type == "DM") client.emit('antiMassDM', (message));
-        
-        if (message.author.id !== client.user.id) return;
-    
-        if (message.content == `<@${client.user.id}>`)
-            return message.edit(`***Votre prefix est: \`${client.db.prefix}\`***`)
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`accepter_${message.author.id}`)
+                    .setStyle(ButtonStyle.Success)
+                    .setLabel("Accepter"),
 
-        const prefix = client.db.prefix || "&"
-        if (!message.content.startsWith(prefix)) return;
-    
-        const args = message.content.slice(prefix.length).trim().split(/ +/g);            
-        const commandName = args.shift().toLowerCase();
-        const commandFile = client.commands.get(commandName) || client.commands.find(command => command.aliases && command.aliases.includes(commandName));
-        
-        if (commandFile){
-            if (commandFile.premium && !client.premium.actif) return message.edit("***Vous devez avoir le premium du bot pour utiliser cette commande***");
-            if (commandFile.nsfw && !client.db.nsfw) return message.edit("***Vous devez activer le mode NSFW pour utiliser cette commande***");
+                new ButtonBuilder()
+                    .setCustomId(`refuser_${message.author.id}`)
+                    .setStyle(ButtonStyle.Danger)
+                    .setLabel("Refuser"),
+            )
 
-            if (commandFile.permission && (!message.guild || !message.member.permissions.has(commandFile.permission)))
-                return message.edit(`***Il vous faut la permission \`${commandFile.permission}\` pour utiliser cette commande***`);
-
-            commandFile.run(client, message, args)
-            if (client.db.time !== 0) 
-                setTimeout(() => 
-                    message.deletable ? 
-                    message.delete().catch(() => false) : 
-                    false, 
-                client.db.time)
+            demandes[message.author.id] = message.content.replaceAll('"', '');
+            fs.writeFileSync('./src/Manager/demandes.json', JSON.stringify(demandes, null, 4));
+            return guild.channels.cache.get(client.config.logChannel)?.send({ embeds: [staff_embed], components: [row] });
         }
-    }
-}
-
-function matchCode(text, callback) {
-    let codes = text.match(/https:\/\/discord\.gift\/[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789]+/)
-    if (codes) {
-        callback(codes[0])
-        return matchCode(text.slice(codes.index + codes[0].length), callback)
-    } else {
-        callback(null)
-    }
-}
+    },
+};
